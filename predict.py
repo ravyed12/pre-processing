@@ -1,6 +1,9 @@
 import pandas as pd
 import joblib
 from nlp_ingredients import analyze_ingredients
+import warnings
+
+warnings.filterwarnings("ignore", category=UserWarning)
 
 def load_models():
     """Load the trained scaler, label encoder, and stacking model."""
@@ -11,22 +14,21 @@ def load_models():
         return model, scaler, le
     except FileNotFoundError as e:
         print(f"Error loading models: {e}")
-        print("Please ensure model.pkl, scaler.pkl, and label_encoder.pkl exist.")
         return None, None, None
 
 def analyze_food_product(features_dict, ingredients_text):
     """
     Complete analysis combining ML prediction from features
     and NLP ingredient analysis.
+    Returns a dictionary suitable for API responses.
     """
     model, scaler, le = load_models()
     if not model:
-        return
+        return {"error": "Models not found"}
 
-    # 1. Feature Engineering (mimicking preprocess.py)
+    # 1. Feature Engineering
     eps = 1
     
-    # Required core features (with defaults if missing)
     energy = features_dict.get("energy_100g", 0)
     sugars = features_dict.get("sugars_100g", 0)
     fat = features_dict.get("fat_100g", 0)
@@ -81,11 +83,9 @@ def analyze_food_product(features_dict, ingredients_text):
     else: ar = 3
     features_dict["additives_risk"] = ar
 
-    # Align columns with scaler
     df_features = pd.DataFrame([features_dict])
     expected_cols = scaler.feature_names_in_
     
-    # Fill any missing columns with 0
     for col in expected_cols:
         if col not in df_features.columns:
             df_features[col] = 0
@@ -98,48 +98,47 @@ def analyze_food_product(features_dict, ingredients_text):
     pred_label = le.inverse_transform([pred_idx])[0]
     pred_probs = model.predict_proba(X_scaled)[0]
     
-    import warnings
-    warnings.filterwarnings("ignore", category=UserWarning)
-
-    print("\n" + "="*60)
-    print("[REPORT] FULL FOOD ANALYSIS REPORT")
-    print("="*60)
-    
-    print(f"\n[ML MODEL PREDICTION]: [{pred_label.upper()}]")
-    print(f"Confidence: Healthy ({pred_probs[0]*100:.1f}%), Moderate ({pred_probs[1]*100:.1f}%), Unhealthy ({pred_probs[2]*100:.1f}%)")
-    
     # 3. NLP Analysis
-    print("\n[NLP] INGREDIENTS NLP ANALYSIS:")
-    print(f"Text: '{ingredients_text}'")
-    print("-" * 60)
-    
     nlp_results = analyze_ingredients(ingredients_text)
-    for res in nlp_results:
-        if res["item"] in ["Clean", "Unknown"]:
-            print(f"OK - {res['warning']} ({res['reason']})")
-        else:
-            detected_str = ", ".join(res.get("detected", []))
-            print(f"WARN - {res['item'].upper()} detected ({detected_str})")
-            print(f"   -> {res['warning']}")
-            print(f"   -> {res['reason']}")
-            
-    print("="*60 + "\n")
-
-if __name__ == "__main__":
-    # Example 1: Unhealthy Product (e.g., Chocolate Bar)
-    choc_features = {
-        "energy_100g": 2200, "sugars_100g": 55, "fat_100g": 30, "saturated_fat_100g": 18,
-        "proteins_100g": 5, "salt_100g": 0.2, "fiber_100g": 3, "carbohydrates_100g": 60,
-        "additives_n": 3, "ingredients_from_palm_oil_n": 1
-    }
-    choc_ingredients = "Sugar, cocoa butter, whole milk powder, palm oil, soy lecithin, artificial flavor, red 40."
-    analyze_food_product(choc_features, choc_ingredients)
     
-    # Example 2: Healthy Product (e.g., Oatmeal)
-    oat_features = {
-        "energy_100g": 1500, "sugars_100g": 1.5, "fat_100g": 7, "saturated_fat_100g": 1.2,
-        "proteins_100g": 13, "salt_100g": 0.01, "fiber_100g": 10, "carbohydrates_100g": 60,
-        "additives_n": 0, "ingredients_from_palm_oil_n": 0
+    # 4. Generate AI Explanation (Rule-based NLP)
+    explanation = f"This food is classified as {pred_label}."
+    if pred_label == "Unhealthy":
+        reasons = []
+        if sugars > 15: reasons.append("high sugar")
+        if fat > 20: reasons.append("high fat")
+        if salt > 1.5: reasons.append("high salt")
+        if sat_fat > 5: reasons.append("high saturated fat")
+        
+        if reasons:
+            explanation += f" It is unhealthy because it contains {', '.join(reasons)}."
+        else:
+            explanation += " It has a poor overall nutritional balance based on its ingredients and macronutrients."
+    elif pred_label == "Healthy":
+        explanation += " It has a good balance of nutrients and minimal harmful additives."
+    else:
+        explanation += " It has a moderate nutritional profile. Consume in moderation."
+        
+    # Scale health balance (-100 to 100 roughly) to a 0-100 score
+    hb = features_dict["health_balance"]
+    health_score_normalized = max(0, min(100, int(((hb + 50) / 100) * 100)))
+
+    return {
+        "prediction": pred_label,
+        "health_score": health_score_normalized,
+        "confidence": {
+            "Healthy": round(pred_probs[0] * 100, 1),
+            "Moderate": round(pred_probs[1] * 100, 1),
+            "Unhealthy": round(pred_probs[2] * 100, 1)
+        },
+        "nlp_analysis": nlp_results,
+        "explanation": explanation,
+        "nutritional_breakdown": {
+            "calories": energy,
+            "protein": proteins,
+            "carbs": carbs,
+            "fat": fat,
+            "sugar": sugars,
+            "fiber": fiber
+        }
     }
-    oat_ingredients = "Whole grain rolled oats."
-    analyze_food_product(oat_features, oat_ingredients)
